@@ -1,4 +1,4 @@
-"""数据目录同步接口：维护同步作业，覆盖启动同步、暂停同步、归档作业等动作。"""
+"""数据目录同步接口：维护同步作业，并按调度执行批次版本执行同步与回写审计台账。"""
 from __future__ import annotations
 
 from typing import Any
@@ -12,8 +12,15 @@ router = APIRouter(prefix="/api/catalog", tags=["数据目录同步"])
 
 service = CatalogService()
 
-LIST_FIELDS = ["作业编号", "源路径", "目标目录", "同步模式", "增量字段", "过滤规则", "同步频率", "作业状态"]
+LIST_FIELDS = ["作业编号", "源路径", "目标目录", "同步模式", "调度批次版本", "依赖完成顺序", "同步频率", "作业状态"]
 STATUSES = ["草稿", "同步中", "已完成", "已暂停"]
+
+
+@router.get("/export")
+def export_entries() -> dict[str, Any]:
+    """导出数据目录同步清单：返回当前过滤条件下的全量数据。"""
+    items, total = service.list_entries(page=1, size=10000)
+    return {"module": "catalog", "total": total, "items": items}
 
 
 @router.get("", response_model=PageResult[dict])
@@ -50,7 +57,7 @@ def create_entry(payload: EntryPayload) -> ActionResult:
 
 @router.post("/{entry_id}/actions", response_model=ActionResult)
 def run_action(entry_id: int, payload: EntryPayload) -> ActionResult:
-    """对单条同步作业执行启动同步、暂停同步、归档作业；不允许的动作会被拦下并说明原因。"""
+    """对单条同步作业执行启动同步、暂停同步、归档作业；状态错位会被拦下并说明原因。"""
     action = str(payload.values.get("action") or "").strip()
     entry, message = service.run_action(entry_id, action)
     if entry is None:
@@ -58,8 +65,21 @@ def run_action(entry_id: int, payload: EntryPayload) -> ActionResult:
     return ActionResult(ok=True, message=message, entry=entry)
 
 
-@router.get("/export")
-def export_entries() -> dict[str, Any]:
-    """导出数据目录同步清单：返回当前过滤条件下的全量数据。"""
-    items, total = service.list_entries(page=1, size=10000)
-    return {"module": "catalog", "total": total, "items": items}
+@router.post("/{entry_id}/sync", response_model=ActionResult)
+def sync_with_batch(entry_id: int, payload: EntryPayload) -> ActionResult:
+    """沿用同一版本调度执行批次启动目录同步，历史记录先兼容再核对版本边界。"""
+    batch_no = str(payload.values.get("批次编号") or "").strip()
+    entry, message = service.sync_with_batch(entry_id, batch_no)
+    if entry is None:
+        return ActionResult(ok=False, message=message)
+    return ActionResult(ok=True, message=message, entry=entry)
+
+
+@router.post("/{entry_id}/complete", response_model=ActionResult)
+def complete_sync(entry_id: int, payload: EntryPayload) -> ActionResult:
+    """完成目录同步并把处理结果同步到调度审计台账，禁止回退已发布版本。"""
+    batch_no = str(payload.values.get("批次编号") or "").strip()
+    entry, message = service.complete_sync(entry_id, batch_no)
+    if entry is None:
+        return ActionResult(ok=False, message=message)
+    return ActionResult(ok=True, message=message, entry=entry)
